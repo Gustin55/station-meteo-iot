@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Station Météo IoT</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen p-6">
+
+    <div class="max-w-5xl mx-auto space-y-6">
+        <header class="flex justify-between items-center bg-white p-6 rounded-2xl shadow-xs">
+            <div>
+                <h1 class="text-2xl font-bold text-slate-900">Station Météo Connectée</h1>
+                <p class="text-sm text-slate-500">Données en temps réel via Supabase</p>
+            </div>
+            <div class="flex items-center space-x-2">
+                <label for="limit" class="text-sm font-medium">Historique :</label>
+                <select id="limit" class="bg-slate-100 border-0 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500" onchange="fetchHistory()">
+                    <option value="10">10 derniers points</option>
+                    <option value="30" selected>30 derniers points</option>
+                    <option value="100">100 derniers points</option>
+                </select>
+            </div>
+        </header>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div class="bg-white p-6 rounded-2xl shadow-xs border-l-4 border-rose-500 flex flex-col justify-between">
+                <span class="text-sm font-semibold uppercase tracking-wider text-slate-400">Température</span>
+                <span id="current-temp" class="text-5xl font-extrabold text-slate-900 my-4">-- °C</span>
+            </div>
+            <div class="bg-white p-6 rounded-2xl shadow-xs border-l-4 border-blue-500 flex flex-col justify-between">
+                <span class="text-sm font-semibold uppercase tracking-wider text-slate-400">Humidité</span>
+                <span id="current-hum" class="text-5xl font-extrabold text-slate-900 my-4">-- %</span>
+            </div>
+        </div>
+
+        <div class="bg-white p-6 rounded-2xl shadow-xs">
+            <div class="h-96 w-full">
+                <canvas id="iotChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration de Supabase
+        const SUPABASE_URL = "https://ehrcchqwechaqrsvqosa.supabase.co";
+        const SUPABASE_KEY = "sb_publishable_5DVz_RDVEMonxrm0OjxiMQ_SdLd9_Kz";
+        const supabase = SUPABASE.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        // Initialisation de Chart.js
+        const ctx = document.getElementById('iotChart').getContext('2d');
+        const chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    {
+                        label: 'Température (°C)',
+                        data: [],
+                        borderColor: '#f43f5e',
+                        backgroundColor: 'transparent',
+                        yAxisID: 'y',
+                        tension: 0.25
+                    },
+                    {
+                        label: 'Humidité (%)',
+                        data: [],
+                        borderColor: '#3b82f6',
+                        backgroundColor: 'transparent',
+                        yAxisID: 'y1',
+                        tension: 0.25
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: { type: 'linear', position: 'left', title: { display: true, text: 'Température (°C)' } },
+                    y1: { type: 'linear', position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: 'Humidité (%)' } }
+                }
+            }
+        });
+
+        // Fonction pour récupérer l'historique initial
+        async function fetchHistory() {
+            const limit = document.getElementById('limit').value;
+            
+            // Requête classique à la base de données
+            let { data, error } = await supabase
+                .from('mesures')
+                .select('created_at, temperature, humidity')
+                .order('created_at', { ascending: false })
+                .limit(limit);
+
+            if (error) console.error(error);
+            
+            // Les données arrivent de la plus récente à la plus ancienne, on les inverse pour le graphique
+            data.reverse();
+
+            // Extraction des tableaux
+            const labels = data.map(m => new Date(m.created_at).toLocaleTimeString());
+            const temps = data.map(m => m.temperature);
+            const hums = data.map(m => m.humidity);
+
+            // Mise à jour de l'affichage actuel (le dernier élément du tableau inversé)
+            if(data.length > 0) {
+                updateCurrentWidgets(data[data.length - 1]);
+            }
+
+            // Mise à jour du graphique
+            chart.data.labels = labels;
+            chart.data.datasets[0].data = temps;
+            chart.data.datasets[1].data = hums;
+            chart.update();
+        }
+
+        function updateCurrentWidgets(mesure) {
+            document.getElementById('current-temp').innerText = mesure.temperature.toFixed(1) + " °C";
+            document.getElementById('current-hum').innerText = mesure.humidity.toFixed(1) + " %";
+        }
+
+        // Écoute en Temps Réel (Supabase Realtime WebSockets)
+        // Note: Assure-toi d'avoir activé "Replication > Source: mesures > Update/Insert" sur ton dashboard Supabase
+        supabase
+            .channel('schema-db-changes')
+            .on(
+                'postgres_changes',
+                { event: 'INSERT', schema: 'public', table: 'mesures' },
+                (payload) => {
+                    const newMesure = payload.new;
+                    const timeLabel = new Date(newMesure.created_at).toLocaleTimeString();
+                    const limit = parseInt(document.getElementById('limit').value);
+
+                    // Mise à jour des widgets texte
+                    updateCurrentWidgets(newMesure);
+
+                    // Injection de la nouvelle donnée dans le graphique
+                    chart.data.labels.push(timeLabel);
+                    chart.data.datasets[0].data.push(newMesure.temperature);
+                    chart.data.datasets[1].data.push(newMesure.humidity);
+
+                    // Ajustement dynamique de la taille selon la limite sélectionnée
+                    if (chart.data.labels.length > limit) {
+                        chart.data.labels.shift();
+                        chart.data.datasets[0].data.shift();
+                        chart.data.datasets[1].data.shift();
+                    }
+
+                    chart.update();
+                }
+            )
+            .subscribe();
+
+        // Initialisation au chargement de la page
+        fetchHistory();
+    </script>
+</body>
+</html>
