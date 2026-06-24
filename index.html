@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Station Météo IoT</title>
+    
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -17,11 +18,11 @@
                 <p class="text-sm text-slate-500">Données en temps réel via Supabase</p>
             </div>
             <div class="flex items-center space-x-2">
-                <label for="limit" class="text-sm font-medium">Historique :</label>
-                <select id="limit" class="bg-slate-100 border-0 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500" onchange="fetchHistory()">
-                    <option value="10">10 derniers points</option>
-                    <option value="30" selected>30 derniers points</option>
-                    <option value="100">100 derniers points</option>
+                <label for="timeframe" class="text-sm font-medium">Période :</label>
+                <select id="timeframe" class="bg-slate-100 border-0 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500" onchange="fetchHistory()">
+                    <option value="1h">Dernière heure</option>
+                    <option value="24h" selected>Dernières 24 heures</option>
+                    <option value="1w">Dernière semaine</option>
                 </select>
             </div>
         </header>
@@ -45,12 +46,11 @@
     </div>
 
     <script>
-        // Configuration de Supabase
         const SUPABASE_URL = "https://ehrcchqwechaqrsvqosa.supabase.co";
-        const SUPABASE_KEY = "sb_publishable_5DVz_RDVEMonxrm0OjxiMQ_SdLd9_Kz";
-        const supabase = SUPABASE.createClient(SUPABASE_URL, SUPABASE_KEY);
+        const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVocmNjaHF3ZWNoYXFyc3Zxb3NhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIzMTQ5NTQsImV4cCI6MjA5Nzg5MDk1NH0.FxaBGZd5-2JWNCz8c5HyQ3YSuD35uqAW4qN2qH0dqOI"; 
+        
+        const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-        // Initialisation de Chart.js
         const ctx = document.getElementById('iotChart').getContext('2d');
         const chart = new Chart(ctx, {
             type: 'line',
@@ -85,77 +85,83 @@
             }
         });
 
-        // Fonction pour récupérer l'historique initial
         async function fetchHistory() {
-            const limit = document.getElementById('limit').value;
-            
-            // Requête classique à la base de données
-            let { data, error } = await supabase
-                .from('mesures')
-                .select('created_at, temperature, humidity')
-                .order('created_at', { ascending: false })
-                .limit(limit);
+            const timeframe = document.getElementById('timeframe').value;
+            const DateSeuil = new Date();
 
-            if (error) console.error(error);
-            
-            // Les données arrivent de la plus récente à la plus ancienne, on les inverse pour le graphique
-            data.reverse();
-
-            // Extraction des tableaux
-            const labels = data.map(m => new Date(m.created_at).toLocaleTimeString());
-            const temps = data.map(m => m.temperature);
-            const hums = data.map(m => m.humidity);
-
-            // Mise à jour de l'affichage actuel (le dernier élément du tableau inversé)
-            if(data.length > 0) {
-                updateCurrentWidgets(data[data.length - 1]);
+            if (timeframe === '1h') {
+                DateSeuil.setHours(DateSeuil.getHours() - 1);
+            } else if (timeframe === '24h') {
+                DateSeuil.setHours(DateSeuil.getHours() - 24);
+            } else if (timeframe === '1w') {
+                DateSeuil.setDate(DateSeuil.getDate() - 7);
             }
 
-            // Mise à jour du graphique
-            chart.data.labels = labels;
-            chart.data.datasets[0].data = temps;
-            chart.data.datasets[1].data = hums;
+            let { data, error } = await db
+                .from('mesures')
+                .select('created_at, temperature, humidity')
+                .gte('created_at', DateSeuil.toISOString())
+                .order('created_at', { ascending: false });
+
+            if (error) {
+                console.error("Erreur Supabase :", error);
+                return;
+            }
+
+            // SÉCURITÉ : Si la base ne renvoie aucun point sur cette période
+            if (!data || data.length === 0) {
+                chart.data.labels = [];
+                chart.data.datasets[0].data = [];
+                chart.data.datasets[1].data = [];
+                chart.update();
+                return;
+            }
+            
+            data.reverse();
+
+            chart.data.labels = data.map(m => {
+                const d = new Date(m.created_at);
+                return timeframe === '1h' 
+                    ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                    : d.toLocaleDateString([], { day: '2-digit', month: '2-digit' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            });
+
+            chart.data.datasets[0].data = data.map(m => m.temperature);
+            chart.data.datasets[1].data = data.map(m => m.humidity);
+
+            updateCurrentWidgets(data[data.length - 1]);
             chart.update();
         }
 
         function updateCurrentWidgets(mesure) {
+            if (!mesure) return;
             document.getElementById('current-temp').innerText = mesure.temperature.toFixed(1) + " °C";
             document.getElementById('current-hum').innerText = mesure.humidity.toFixed(1) + " %";
         }
 
-        // Écoute en Temps Réel (Supabase Realtime WebSockets)
-        // Note: Assure-toi d'avoir activé "Replication > Source: mesures > Update/Insert" sur ton dashboard Supabase
-        supabase
+        // Écoute des envois en direct de l'ESP32
+        db
             .channel('schema-db-changes')
-            .on(
-                'postgres_changes',
-                { event: 'INSERT', schema: 'public', table: 'mesures' },
+            .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'mesures' },
                 (payload) => {
                     const newMesure = payload.new;
-                    const timeLabel = new Date(newMesure.created_at).toLocaleTimeString();
-                    const limit = parseInt(document.getElementById('limit').value);
+                    const timeframe = document.getElementById('timeframe').value;
 
-                    // Mise à jour des widgets texte
                     updateCurrentWidgets(newMesure);
 
-                    // Injection de la nouvelle donnée dans le graphique
-                    chart.data.labels.push(timeLabel);
+                    const d = new Date(newMesure.created_at);
+                    const label = timeframe === '1h' 
+                        ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                        : d.toLocaleDateString([], { day: '2-digit', month: '2-digit' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+                    chart.data.labels.push(label);
                     chart.data.datasets[0].data.push(newMesure.temperature);
                     chart.data.datasets[1].data.push(newMesure.humidity);
 
-                    // Ajustement dynamique de la taille selon la limite sélectionnée
-                    if (chart.data.labels.length > limit) {
-                        chart.data.labels.shift();
-                        chart.data.datasets[0].data.shift();
-                        chart.data.datasets[1].data.shift();
-                    }
-
                     chart.update();
                 }
-            )
-            .subscribe();
+            ).subscribe();
 
-        // Initialisation au chargement de la page
         fetchHistory();
     </script>
 </body>
